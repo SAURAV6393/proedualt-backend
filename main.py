@@ -37,7 +37,7 @@ CAREER_MAP = {
 app = FastAPI()
 
 # CORS Middleware
-origins = [ "http://localhost:3000", ]
+origins = [ "http://localhost:3000", "https://proedualt-frontend.vercel.app" ]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
