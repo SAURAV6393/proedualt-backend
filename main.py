@@ -5,9 +5,10 @@ import requests
 from supabase import create_client, Client
 
 # --- IMPORTANT ---
-# Make sure your Supabase URL and Key are here
-SUPABASE_URL = "https://kutzcpkonzplozbgucng.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzII1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt1dHpjcGtvbnpwbG96Ymd1Y25nIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTUzMjM0NTIsImV4cCI6MjA3MDg5OTQ1Mn0.1qCpi-u4StISx3dyPHF-f8tDOnw4Lu0JJgq9kJuTCgQ"
+# Keys ab Render ke Environment Variables se aayengi
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN") # Naya token
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # DEFINE JOB ROLES AND THEIR SKILLS
@@ -49,8 +50,14 @@ app.add_middleware(
 @app.get("/analyze")
 def analyze_profile(github_username: str):
     api_url = f"https://api.github.com/users/{github_username}/repos"
+    
+    # Naya: GitHub ko request bhejte waqt token ka istemal karo
+    headers = {}
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"token {GITHUB_TOKEN}"
+
     try:
-        response = requests.get(api_url)
+        response = requests.get(api_url, headers=headers)
         repos = response.json()
         if response.status_code != 200:
             return {"error": "Could not fetch data from GitHub. User might not exist."}
@@ -89,7 +96,6 @@ def analyze_profile(github_username: str):
     sorted_recommendations = sorted(recommendations, key=lambda x: x['score'], reverse=True)
     return sorted_recommendations
 
-# NEW ENDPOINT TO UPDATE A USER'S PROFILE
 @app.post("/profile/update")
 def update_profile(data: dict):
     user_id = data.get("user_id")
@@ -99,7 +105,6 @@ def update_profile(data: dict):
         return {"error": "User ID and GitHub username are required."}
 
     try:
-        # Update the row in the profiles table where the id matches the user's id
         response = supabase.table('profiles').update({'github_username': github_username}).eq('id', user_id).execute()
         return {"success": True, "data": response.data}
     except Exception as e:
