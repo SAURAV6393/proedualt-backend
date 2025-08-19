@@ -4,7 +4,6 @@ from fastapi.middleware.cors import CORSMiddleware
 import requests
 from supabase import create_client, Client
 import random
-from bs4 import BeautifulSoup
 
 # --- Environment Variables ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -27,9 +26,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Other Endpoints (No changes needed here) ---
+# --- Existing Endpoints (No changes needed) ---
 @app.get("/analyze")
 def analyze_profile(github_username: str):
+    # ... (code is the same)
     api_url = f"https://api.github.com/users/{github_username}/repos"
     headers = {}
     if GITHUB_TOKEN:
@@ -61,23 +61,25 @@ def analyze_profile(github_username: str):
 
 @app.post("/generate-plan")
 def generate_plan(data: dict):
+    # ... (code is the same, but we will add resource IDs to the response)
     user_skills = data.get("user_skills", [])
     target_career = data.get("target_career", {})
     if not user_skills or not target_career: return {"error": "User skills and target career are required."}
     required_skills = target_career.get("all_required_skills", [])
     skill_gaps = [skill for skill in required_skills if skill not in user_skills]
-    if not skill_gaps: return {"plan": [{"title": "You have all the required skills! Great job!", "url": ""}]}
+    if not skill_gaps: return {"plan": [{"id": 0, "title": "You have all the required skills! Great job!", "url": ""}]}
     skill_to_learn = random.choice(skill_gaps)
     try:
-        response = supabase.table('learning_resources').select("*").eq('skill_name', skill_to_learn).eq('difficulty', 'Beginner').execute()
-        if not response.data: return {"plan": [{"title": f"No beginner resources found for {skill_to_learn}. Try searching online!", "url": ""}]}
-        learning_plan = [{"title": f"Learn {skill_to_learn}: {resource['title']}", "url": resource['url']} for resource in response.data]
+        response = supabase.table('learning_resources').select("id, title, url").eq('skill_name', skill_to_learn).eq('difficulty', 'Beginner').execute()
+        if not response.data: return {"plan": [{"id": 0, "title": f"No beginner resources found for {skill_to_learn}. Try searching online!", "url": ""}]}
+        learning_plan = [{"id": resource['id'], "title": f"Learn {skill_to_learn}: {resource['title']}", "url": resource['url']} for resource in response.data]
         return {"plan": learning_plan}
     except Exception as e:
         return {"error": str(e)}
 
 @app.post("/profile/update")
 def update_profile(data: dict):
+    # ... (code is the same)
     user_id = data.get("user_id")
     github_username = data.get("github_username")
     if not user_id or not github_username: return {"error": "User ID and GitHub username are required."}
@@ -89,8 +91,50 @@ def update_profile(data: dict):
 
 @app.get("/jobs")
 def get_jobs():
+    # ... (code is the same)
     try:
         response = supabase.table('job_postings').select("*").order('id', desc=True).execute()
         return response.data
     except Exception as e:
+        return {"error": str(e)}
+
+# --- NEW ENDPOINTS FOR LEARNING PROGRESS ---
+
+# 1. Endpoint to get a user's completed tasks
+@app.get("/learning-progress/{user_id}")
+def get_learning_progress(user_id: str):
+    try:
+        response = supabase.table('user_learning_progress').select('resource_id').eq('user_id', user_id).execute()
+        # Return a simple list of completed resource IDs
+        completed_ids = [item['resource_id'] for item in response.data]
+        return {"completed_ids": completed_ids}
+    except Exception as e:
+        return {"error": str(e)}
+
+# 2. Endpoint to mark a task as complete
+@app.post("/learning-progress")
+def mark_as_complete(data: dict):
+    user_id = data.get("user_id")
+    resource_id = data.get("resource_id")
+    is_complete = data.get("is_complete") # True if checking, False if unchecking
+
+    if not user_id or not resource_id:
+        return {"error": "User ID and Resource ID are required."}
+
+    try:
+        if is_complete:
+            # Add a new entry to the progress table
+            response = supabase.table('user_learning_progress').insert({
+                'user_id': user_id,
+                'resource_id': resource_id
+            }).execute()
+            return {"success": True, "message": "Progress saved."}
+        else:
+            # Remove the entry from the progress table
+            response = supabase.table('user_learning_progress').delete().eq('user_id', user_id).eq('resource_id', resource_id).execute()
+            return {"success": True, "message": "Progress removed."}
+    except Exception as e:
+        # Handle the case where the user tries to complete the same task twice
+        if "duplicate key value violates unique constraint" in str(e):
+            return {"success": True, "message": "Already marked as complete."}
         return {"error": str(e)}
