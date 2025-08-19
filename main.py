@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import requests
 from supabase import create_client, Client
 import random
-import fitz # This is the PyMuPDF library
+import fitz # PyMuPDF
 
 # --- Environment Variables ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -12,10 +12,21 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# --- MASTER SKILL LIST ---
+# This is the list of skills our app will look for in a resume.
+SKILL_LIST = [
+    "python", "java", "c++", "c#", "javascript", "typescript", "html", "css", 
+    "react", "angular", "vue", "next.js", "node.js", "express", "django", "flask",
+    "fastapi", "sql", "mysql", "postgresql", "mongodb", "firebase", "aws", "azure",
+    "google cloud", "docker", "kubernetes", "git", "github", "linux", "rest api",
+    "graphql", "machine learning", "data science", "pandas", "numpy", "tensorflow",
+    "pytorch", "scikit-learn", "swift", "kotlin", "dart", "flutter", "react native"
+]
+
 CAREER_MAP = {
-    "Frontend Developer": {"required": ["JavaScript", "HTML", "CSS", "React"],"weight": 1.0},
-    "Backend Developer": {"required": ["Python", "Java", "Go", "SQL"],"weight": 1.0},
-    "Data Scientist / ML Engineer": {"required": ["Python", "Jupyter Notebook", "SQL"],"weight": 1.5},
+    "Frontend Developer": {"required": ["JavaScript", "HTML", "CSS", "React", "TypeScript", "Next.js"],"weight": 1.0},
+    "Backend Developer": {"required": ["Python", "Java", "Go", "SQL", "Node.js", "REST API"],"weight": 1.0},
+    "Data Scientist / ML Engineer": {"required": ["Python", "SQL", "Machine Learning", "Pandas", "TensorFlow"],"weight": 1.5},
 }
 app = FastAPI()
 origins = [ "http://localhost:3000", "https://proedualt-frontend.vercel.app" ]
@@ -27,68 +38,95 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- NEW ENDPOINT FOR RESUME UPLOAD ---
-@app.post("/upload-resume")
-async def upload_resume(file: UploadFile = File(...)):
-    # Check if the uploaded file is a PDF
-    if file.content_type != "application/pdf":
-        raise HTTPException(status_code=400, detail="Invalid file type. Please upload a PDF.")
+# --- Helper function to extract skills from text ---
+def extract_skills_from_text(text):
+    found_skills = set()
+    text_lower = text.lower()
+    for skill in SKILL_LIST:
+        if skill.lower() in text_lower:
+            # Find the original casing if possible (e.g., "Next.js" instead of "next.js")
+            original_casing_skill = next((s for s in CAREER_MAP.get("Frontend Developer", {}).get("required", []) + CAREER_MAP.get("Backend Developer", {}).get("required", []) + CAREER_MAP.get("Data Scientist / ML Engineer", {}).get("required", []) if s.lower() == skill.lower()), skill)
+            found_skills.add(original_casing_skill)
+    return list(found_skills)
 
-    # For now, we will just read the file and confirm it's a valid PDF
-    # In the next step, we will add the logic to extract text and skills
+# --- UPDATED Resume Upload Endpoint ---
+@app.post("/upload-resume/{user_id}")
+async def upload_resume(user_id: str, file: UploadFile = File(...)):
+    if file.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="Please upload a PDF file.")
     try:
         pdf_document = fitz.open(stream=await file.read(), filetype="pdf")
-        text = ""
-        for page in pdf_document:
-            text += page.get_text()
-        
+        text = "".join(page.get_text() for page in pdf_document)
         if not text.strip():
-             raise HTTPException(status_code=400, detail="Could not read any text from the PDF.")
+            raise HTTPException(status_code=400, detail="Could not read text from the PDF.")
+        
+        # Extract skills from the text
+        resume_skills = extract_skills_from_text(text)
+        
+        # Save the extracted skills to the user's profile in the database
+        response = supabase.table('profiles').update({'resume_skills': resume_skills}).eq('id', user_id).execute()
+        
+        return {"message": "Resume processed successfully!", "skills_found": resume_skills}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing PDF file: {str(e)}")
-
-    # For now, just return a success message with the extracted text (for testing)
-    # We will replace this with skill extraction logic later
-    return {"message": "PDF processed successfully!", "extracted_text_preview": text[:200] + "..."}
+        raise HTTPException(status_code=500, detail=f"Error processing PDF: {str(e)}")
 
 
-# --- Existing Endpoints (No changes needed) ---
-@app.get("/analyze")
-def analyze_profile(github_username: str):
-    # ... (code is the same)
-    api_url = f"https://api.github.com/users/{github_username}/repos"
-    headers = {}
-    if GITHUB_TOKEN:
-        headers["Authorization"] = f"token {GITHUB_TOKEN}"
+# --- UPDATED Analyze Endpoint ---
+@app.get("/analyze/{user_id}")
+def analyze_profile(user_id: str):
     try:
+        # Fetch user's profile, including GitHub username and resume skills
+        profile_response = supabase.table('profiles').select('github_username, resume_skills').eq('id', user_id).single().execute()
+        profile_data = profile_response.data
+        
+        if not profile_data or not profile_data.get('github_username'):
+            return {"error": "GitHub username not found for this user."}
+            
+        github_username = profile_data['github_username']
+        resume_skills = set(profile_data.get('resume_skills') or [])
+
+        # Fetch skills from GitHub
+        api_url = f"https://api.github.com/users/{github_username}/repos"
+        headers = {"Authorization": f"token {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
         response = requests.get(api_url, headers=headers)
         repos = response.json()
-        if response.status_code != 200: return {"error": "Could not fetch data from GitHub. User might not exist."}
-        language_counts = {}
+        if response.status_code != 200: return {"error": "Could not fetch data from GitHub."}
+        
+        github_skills = set()
         for repo in repos:
             language = repo.get("language")
-            if language: language_counts[language] = language_counts.get(language, 0) + 1
-        if not language_counts: return {"error": f"No repositories with languages found for user '{github_username}'."}
-        user_languages = list(language_counts.keys())
+            if language:
+                github_skills.add(language)
+        
+        # Combine skills from resume and GitHub
+        combined_skills = list(resume_skills.union(github_skills))
+        
+        if not combined_skills:
+            return {"error": "No skills found from GitHub or resume."}
+
+        # Generate recommendations based on the combined skill set
         recommendations = []
         for career, skills in CAREER_MAP.items():
-            score = 0
-            matched_skills = []
-            for lang in user_languages:
-                if lang in skills["required"]:
-                    score += language_counts[lang]
-                    matched_skills.append(lang)
-            final_score = score * skills["weight"]
-            if final_score > 0:
-                recommendations.append({"career": career, "score": final_score, "matched_skills": matched_skills, "all_required_skills": skills["required"]})
+            matched_skills = [skill for skill in combined_skills if skill in skills["required"]]
+            if matched_skills:
+                # Simple score: number of matched skills
+                score = len(matched_skills) * skills["weight"]
+                recommendations.append({
+                    "career": career,
+                    "score": score,
+                    "matched_skills": matched_skills,
+                    "all_required_skills": skills["required"]
+                })
+        
         return sorted(recommendations, key=lambda x: x['score'], reverse=True)
+
     except Exception as e:
         return {"error": str(e)}
 
+# ... (All other endpoints like /generate-plan, /profile/update, etc. remain the same)
 @app.post("/generate-plan")
 def generate_plan(data: dict):
-    # ... (code is the same)
     user_skills = data.get("user_skills", [])
     target_career = data.get("target_career", {})
     if not user_skills or not target_career: return {"error": "User skills and target career are required."}
@@ -106,7 +144,6 @@ def generate_plan(data: dict):
 
 @app.post("/profile/update")
 def update_profile(data: dict):
-    # ... (code is the same)
     user_id = data.get("user_id")
     github_username = data.get("github_username")
     if not user_id or not github_username: return {"error": "User ID and GitHub username are required."}
@@ -118,7 +155,6 @@ def update_profile(data: dict):
 
 @app.get("/jobs")
 def get_jobs():
-    # ... (code is the same)
     try:
         response = supabase.table('job_postings').select("*").order('id', desc=True).execute()
         return response.data
@@ -127,7 +163,6 @@ def get_jobs():
 
 @app.get("/learning-progress/{user_id}")
 def get_learning_progress(user_id: str):
-    # ... (code is the same)
     try:
         response = supabase.table('user_learning_progress').select('resource_id').eq('user_id', user_id).execute()
         completed_ids = [item['resource_id'] for item in response.data]
@@ -137,7 +172,6 @@ def get_learning_progress(user_id: str):
 
 @app.post("/learning-progress")
 def mark_as_complete(data: dict):
-    # ... (code is the same)
     user_id = data.get("user_id")
     resource_id = data.get("resource_id")
     is_complete = data.get("is_complete")
