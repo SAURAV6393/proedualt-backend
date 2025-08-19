@@ -1,9 +1,10 @@
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 from supabase import create_client, Client
 import random
+import fitz # This is the PyMuPDF library
 
 # --- Environment Variables ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
@@ -25,6 +26,32 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- NEW ENDPOINT FOR RESUME UPLOAD ---
+@app.post("/upload-resume")
+async def upload_resume(file: UploadFile = File(...)):
+    # Check if the uploaded file is a PDF
+    if file.content_type != "application/pdf":
+        raise HTTPException(status_code=400, detail="Invalid file type. Please upload a PDF.")
+
+    # For now, we will just read the file and confirm it's a valid PDF
+    # In the next step, we will add the logic to extract text and skills
+    try:
+        pdf_document = fitz.open(stream=await file.read(), filetype="pdf")
+        text = ""
+        for page in pdf_document:
+            text += page.get_text()
+        
+        if not text.strip():
+             raise HTTPException(status_code=400, detail="Could not read any text from the PDF.")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing PDF file: {str(e)}")
+
+    # For now, just return a success message with the extracted text (for testing)
+    # We will replace this with skill extraction logic later
+    return {"message": "PDF processed successfully!", "extracted_text_preview": text[:200] + "..."}
+
 
 # --- Existing Endpoints (No changes needed) ---
 @app.get("/analyze")
@@ -61,7 +88,7 @@ def analyze_profile(github_username: str):
 
 @app.post("/generate-plan")
 def generate_plan(data: dict):
-    # ... (code is the same, but we will add resource IDs to the response)
+    # ... (code is the same)
     user_skills = data.get("user_skills", [])
     target_career = data.get("target_career", {})
     if not user_skills or not target_career: return {"error": "User skills and target career are required."}
@@ -98,43 +125,30 @@ def get_jobs():
     except Exception as e:
         return {"error": str(e)}
 
-# --- NEW ENDPOINTS FOR LEARNING PROGRESS ---
-
-# 1. Endpoint to get a user's completed tasks
 @app.get("/learning-progress/{user_id}")
 def get_learning_progress(user_id: str):
+    # ... (code is the same)
     try:
         response = supabase.table('user_learning_progress').select('resource_id').eq('user_id', user_id).execute()
-        # Return a simple list of completed resource IDs
         completed_ids = [item['resource_id'] for item in response.data]
         return {"completed_ids": completed_ids}
     except Exception as e:
         return {"error": str(e)}
 
-# 2. Endpoint to mark a task as complete
 @app.post("/learning-progress")
 def mark_as_complete(data: dict):
+    # ... (code is the same)
     user_id = data.get("user_id")
     resource_id = data.get("resource_id")
-    is_complete = data.get("is_complete") # True if checking, False if unchecking
-
-    if not user_id or not resource_id:
-        return {"error": "User ID and Resource ID are required."}
-
+    is_complete = data.get("is_complete")
+    if not user_id or not resource_id: return {"error": "User ID and Resource ID are required."}
     try:
         if is_complete:
-            # Add a new entry to the progress table
-            response = supabase.table('user_learning_progress').insert({
-                'user_id': user_id,
-                'resource_id': resource_id
-            }).execute()
+            response = supabase.table('user_learning_progress').insert({'user_id': user_id, 'resource_id': resource_id}).execute()
             return {"success": True, "message": "Progress saved."}
         else:
-            # Remove the entry from the progress table
             response = supabase.table('user_learning_progress').delete().eq('user_id', user_id).eq('resource_id', resource_id).execute()
             return {"success": True, "message": "Progress removed."}
     except Exception as e:
-        # Handle the case where the user tries to complete the same task twice
-        if "duplicate key value violates unique constraint" in str(e):
-            return {"success": True, "message": "Already marked as complete."}
+        if "duplicate key value violates unique constraint" in str(e): return {"success": True, "message": "Already marked as complete."}
         return {"error": str(e)}
