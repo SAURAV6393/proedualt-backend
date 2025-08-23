@@ -4,14 +4,20 @@ from fastapi.middleware.cors import CORSMiddleware
 import requests
 from supabase import create_client, Client
 import random
+import google.generativeai as genai # Nayi library import karo
 
 # --- Environment Variables ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") # Nayi key
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ... (CAREER_MAP, app, and CORS middleware remain the same) ...
+# Gemini AI ko configure karo
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
+# ... (Aapka CAREER_MAP, app, aur CORS middleware ka code yahan aayega) ...
 CAREER_MAP = {
     "Frontend Developer": {"required": ["JavaScript", "HTML", "CSS", "React"],"weight": 1.0},
     "Backend Developer": {"required": ["Python", "Java", "Go", "SQL"],"weight": 1.0},
@@ -27,7 +33,38 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ... (Existing endpoints like /analyze, /generate-plan, etc. remain the same) ...
+# --- NAYA: AI Mentor Chatbot Endpoint ---
+@app.post("/ask-mentor")
+def ask_mentor(data: dict):
+    question = data.get("question")
+    user_skills = data.get("user_skills", [])
+
+    if not question:
+        raise HTTPException(status_code=400, detail="Question is required.")
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not configured on the server.")
+
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        # Ek behtar prompt banate hain jisme user ki skills bhi shamil hon
+        prompt = f"""
+        You are "ProEduAlt Mentor," an expert career counselor for software engineering students.
+        A student with the following skills: {', '.join(user_skills) if user_skills else 'no specific skills listed'} has asked a question.
+        
+        Question: "{question}"
+        
+        Your answer should be helpful, encouraging, and directly related to the student's question and their skill level.
+        Provide actionable advice. Keep the response concise and easy to understand.
+        """
+        
+        response = model.generate_content(prompt)
+        return {"answer": response.text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error communicating with Gemini API: {str(e)}")
+
+
+# ... (Aapke purane endpoints jaise /analyze, /generate-plan, etc. yahan aayenge) ...
 @app.get("/analyze/{user_id}")
 def analyze_profile(user_id: str):
     try:
@@ -103,53 +140,23 @@ def get_learning_progress(user_id: str):
     except Exception as e:
         return {"error": str(e)}
 
-# --- UPDATED Learning Progress Endpoint with XP Logic ---
 @app.post("/learning-progress")
 def mark_as_complete(data: dict):
     user_id = data.get("user_id")
     resource_id = data.get("resource_id")
     is_complete = data.get("is_complete")
-
-    if not user_id or not resource_id:
-        return {"error": "User ID and Resource ID are required."}
-
+    if not user_id or not resource_id: return {"error": "User ID and Resource ID are required."}
     try:
-        # Get the XP points for the completed resource
         resource_response = supabase.table('learning_resources').select('xp_points').eq('id', resource_id).single().execute()
         xp_to_change = resource_response.data.get('xp_points', 0)
-
         if is_complete:
-            # Add a new entry to the progress table
-            supabase.table('user_learning_progress').insert({
-                'user_id': user_id,
-                'resource_id': resource_id
-            }).execute()
-            # Add XP to the user's total score
+            supabase.table('user_learning_progress').insert({'user_id': user_id, 'resource_id': resource_id}).execute()
             supabase.rpc('increment_xp', {'user_id_param': user_id, 'xp_param': xp_to_change}).execute()
             return {"success": True, "message": "Progress saved."}
         else:
-            # Remove the entry from the progress table
             supabase.table('user_learning_progress').delete().eq('user_id', user_id).eq('resource_id', resource_id).execute()
-            # Subtract XP from the user's total score
             supabase.rpc('increment_xp', {'user_id_param': user_id, 'xp_param': -xp_to_change}).execute()
             return {"success": True, "message": "Progress removed."}
-            
     except Exception as e:
-        if "duplicate key value violates unique constraint" in str(e):
-            return {"success": True, "message": "Already marked as complete."}
+        if "duplicate key value violates unique constraint" in str(e): return {"success": True, "message": "Already marked as complete."}
         return {"error": str(e)}
-
-# --- NEW DATABASE FUNCTION TO HANDLE XP ---
-# This part is a bit different. We need to create a function directly in the Supabase SQL Editor
-# to handle the XP update safely.
-
-# Go to your Supabase SQL Editor and run this command ONCE:
-#
-# CREATE OR REPLACE FUNCTION increment_xp(user_id_param UUID, xp_param INT)
-# RETURNS VOID AS $$
-# BEGIN
-#   UPDATE public.profiles
-#   SET total_xp = total_xp + xp_param
-#   WHERE id = user_id_param;
-# END;
-# $$ LANGUAGE plpgsql;
