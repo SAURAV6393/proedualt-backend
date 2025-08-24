@@ -17,7 +17,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# ... (Aapka CAREER_MAP, app, aur CORS middleware ka code yahan aayega) ...
+# CAREER_MAP, app, aur CORS middleware
 CAREER_MAP = {
     "Frontend Developer": {"required": ["JavaScript", "HTML", "CSS", "React"],"weight": 1.0},
     "Backend Developer": {"required": ["Python", "Java", "Go", "SQL"],"weight": 1.0},
@@ -64,7 +64,7 @@ def ask_mentor(data: dict):
         raise HTTPException(status_code=500, detail=f"Error communicating with Gemini API: {str(e)}")
 
 
-# ... (Aapke purane endpoints jaise /analyze, /generate-plan, etc. yahan aayenge) ...
+# --- Purane Endpoints ---
 @app.get("/analyze/{user_id}")
 def analyze_profile(user_id: str):
     try:
