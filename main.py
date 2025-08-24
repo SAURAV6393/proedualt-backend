@@ -4,20 +4,20 @@ from fastapi.middleware.cors import CORSMiddleware
 import requests
 from supabase import create_client, Client
 import random
-import google.generativeai as genai # Nayi library import karo
+import google.generativeai as genai
 
 # --- Environment Variables ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") # Nayi key
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Gemini AI ko configure karo
+# Configure Gemini AI
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# CAREER_MAP, app, aur CORS middleware
+# ... (CAREER_MAP, app, and CORS middleware remain the same) ...
 CAREER_MAP = {
     "Frontend Developer": {"required": ["JavaScript", "HTML", "CSS", "React"],"weight": 1.0},
     "Backend Developer": {"required": ["Python", "Java", "Go", "SQL"],"weight": 1.0},
@@ -33,45 +33,76 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- NAYA: AI Mentor Chatbot Endpoint ---
-@app.post("/ask-mentor")
-def ask_mentor(data: dict):
-    question = data.get("question")
-    user_skills = data.get("user_skills", [])
+# --- NEW MOCK INTERVIEW ENDPOINTS ---
 
-    if not question:
-        raise HTTPException(status_code=400, detail="Question is required.")
+@app.post("/start-interview")
+def start_interview(data: dict):
+    career_path = data.get("career_path")
+    if not career_path:
+        raise HTTPException(status_code=400, detail="Career path is required.")
+    try:
+        # Fetch all questions for the given career path
+        response = supabase.table('interview_questions').select("*").eq('career_path', career_path).execute()
+        if not response.data:
+            raise HTTPException(status_code=404, detail="No interview questions found for this career path.")
+        # Return a random question from the list
+        return random.choice(response.data)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/submit-answer")
+def submit_answer(data: dict):
+    question = data.get("question")
+    answer = data.get("answer")
+
+    if not question or not answer:
+        raise HTTPException(status_code=400, detail="Question and answer are required.")
     if not GEMINI_API_KEY:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not configured on the server.")
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not configured.")
 
     try:
         model = genai.GenerativeModel('gemini-1.5-flash')
         
-        # Ek behtar prompt banate hain jisme user ki skills bhi shamil hon
         prompt = f"""
-        You are "ProEduAlt Mentor," an expert career counselor for software engineering students.
-        A student with the following skills: {', '.join(user_skills) if user_skills else 'no specific skills listed'} has asked a question.
+        You are an expert interviewer for a top tech company. A student is practicing for an interview.
         
-        Question: "{question}"
+        The interview question was: "{question}"
+        The student's answer is: "{answer}"
         
-        Your answer should be helpful, encouraging, and directly related to the student's question and their skill level.
-        Provide actionable advice. Keep the response concise and easy to understand.
+        Please provide constructive feedback on the student's answer. Structure your feedback in two parts:
+        1.  **What was good:** Briefly mention one or two positive aspects of the answer.
+        2.  **How to improve:** Provide a clear, actionable suggestion for how the student could make their answer better or more comprehensive.
+        
+        Keep your feedback concise, encouraging, and helpful.
         """
         
+        response = model.generate_content(prompt)
+        return {"feedback": response.text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error communicating with Gemini API: {str(e)}")
+
+
+# ... (All other endpoints like /analyze, /ask-mentor, etc. remain the same) ...
+@app.post("/ask-mentor")
+def ask_mentor(data: dict):
+    question = data.get("question")
+    user_skills = data.get("user_skills", [])
+    if not question: raise HTTPException(status_code=400, detail="Question is required.")
+    if not GEMINI_API_KEY: raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not configured on the server.")
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        prompt = f"You are 'ProEduAlt Mentor,' an expert career counselor for software engineering students. A student with skills: {', '.join(user_skills) if user_skills else 'none listed'} asked: '{question}'. Your answer should be helpful, encouraging, and provide actionable advice. Keep it concise."
         response = model.generate_content(prompt)
         return {"answer": response.text}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error communicating with Gemini API: {str(e)}")
 
-
-# --- Purane Endpoints ---
 @app.get("/analyze/{user_id}")
 def analyze_profile(user_id: str):
     try:
         profile_response = supabase.table('profiles').select('github_username, resume_skills').eq('id', user_id).single().execute()
         profile_data = profile_response.data
-        if not profile_data or not profile_data.get('github_username'):
-            return {"error": "GitHub username not found for this user."}
+        if not profile_data or not profile_data.get('github_username'): return {"error": "GitHub username not found for this user."}
         github_username = profile_data['github_username']
         resume_skills = set(profile_data.get('resume_skills') or [])
         api_url = f"https://api.github.com/users/{github_username}/repos"
