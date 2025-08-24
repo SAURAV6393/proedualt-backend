@@ -4,18 +4,12 @@ from fastapi.middleware.cors import CORSMiddleware
 import requests
 from supabase import create_client, Client
 import random
-import google.generativeai as genai
 
 # --- Environment Variables ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# Configure Gemini AI
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
 
 # ... (CAREER_MAP, app, and CORS middleware remain the same) ...
 CAREER_MAP = {
@@ -33,70 +27,90 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- NEW MOCK INTERVIEW ENDPOINTS ---
+# --- NEW PORTFOLIO ENDPOINTS ---
 
-@app.post("/start-interview")
-def start_interview(data: dict):
-    career_path = data.get("career_path")
-    if not career_path:
-        raise HTTPException(status_code=400, detail="Career path is required.")
+@app.get("/portfolio/{github_username}")
+def get_portfolio_data(github_username: str):
     try:
-        # Fetch all questions for the given career path
-        response = supabase.table('interview_questions').select("*").eq('career_path', career_path).execute()
-        if not response.data:
-            raise HTTPException(status_code=404, detail="No interview questions found for this career path.")
-        # Return a random question from the list
-        return random.choice(response.data)
+        # 1. Fetch the user's profile from our database
+        profile_response = supabase.table('profiles').select("*").eq('github_username', github_username).single().execute()
+        if not profile_response.data:
+            raise HTTPException(status_code=404, detail="Profile not found.")
+        profile_data = profile_response.data
+
+        # 2. Fetch the user's top 3 projects from our database
+        projects_response = supabase.table('projects').select("*").eq('user_id', profile_data['id']).order('stars', desc=True).limit(3).execute()
+        
+        return {
+            "profile": profile_data,
+            "projects": projects_response.data
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/submit-answer")
-def submit_answer(data: dict):
-    question = data.get("question")
-    answer = data.get("answer")
-
-    if not question or not answer:
-        raise HTTPException(status_code=400, detail="Question and answer are required.")
-    if not GEMINI_API_KEY:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not configured.")
-
+@app.post("/sync-projects/{user_id}")
+def sync_projects(user_id: str):
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        # Get the user's GitHub username from our database
+        profile_response = supabase.table('profiles').select('github_username').eq('id', user_id).single().execute()
+        github_username = profile_response.data.get('github_username')
+        if not github_username:
+            raise HTTPException(status_code=404, detail="GitHub username not found.")
+
+        # Fetch repos from GitHub API
+        api_url = f"https://api.github.com/users/{github_username}/repos?sort=updated&per_page=100"
+        headers = {"Authorization": f"token {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
+        response = requests.get(api_url, headers=headers)
+        repos = response.json()
+
+        projects_to_upsert = []
+        for repo in repos:
+            if not repo.get('fork'): # We only want original projects
+                projects_to_upsert.append({
+                    'user_id': user_id,
+                    'repo_name': repo['name'],
+                    'description': repo['description'],
+                    'repo_url': repo['html_url'],
+                    'languages': [repo['language']] if repo['language'] else [],
+                    'stars': repo['stargazers_count']
+                })
         
-        prompt = f"""
-        You are an expert interviewer for a top tech company. A student is practicing for an interview.
+        # Delete old projects and insert new ones (upsert)
+        supabase.table('projects').delete().eq('user_id', user_id).execute()
+        if projects_to_upsert:
+            supabase.table('projects').insert(projects_to_upsert).execute()
         
-        The interview question was: "{question}"
-        The student's answer is: "{answer}"
-        
-        Please provide constructive feedback on the student's answer. Structure your feedback in two parts:
-        1.  **What was good:** Briefly mention one or two positive aspects of the answer.
-        2.  **How to improve:** Provide a clear, actionable suggestion for how the student could make their answer better or more comprehensive.
-        
-        Keep your feedback concise, encouraging, and helpful.
-        """
-        
-        response = model.generate_content(prompt)
-        return {"feedback": response.text}
+        return {"message": f"Successfully synced {len(projects_to_upsert)} projects."}
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error communicating with Gemini API: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-# ... (All other endpoints like /analyze, /ask-mentor, etc. remain the same) ...
-@app.post("/ask-mentor")
-def ask_mentor(data: dict):
-    question = data.get("question")
-    user_skills = data.get("user_skills", [])
-    if not question: raise HTTPException(status_code=400, detail="Question is required.")
-    if not GEMINI_API_KEY: raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not configured on the server.")
+# --- UPDATED Profile Update Endpoint ---
+@app.post("/profile/update")
+def update_profile(data: dict):
+    user_id = data.get("user_id")
+    # Now accepts more fields
+    update_data = {
+        "github_username": data.get("github_username"),
+        "full_name": data.get("full_name"),
+        "bio": data.get("bio"),
+        "linkedin_url": data.get("linkedin_url"),
+        "is_public": data.get("is_public")
+    }
+    # Remove any fields that were not provided
+    update_data = {k: v for k, v in update_data.items() if v is not None}
+
+    if not user_id:
+        return {"error": "User ID is required."}
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        prompt = f"You are 'ProEduAlt Mentor,' an expert career counselor for software engineering students. A student with skills: {', '.join(user_skills) if user_skills else 'none listed'} asked: '{question}'. Your answer should be helpful, encouraging, and provide actionable advice. Keep it concise."
-        response = model.generate_content(prompt)
-        return {"answer": response.text}
+        response = supabase.table('profiles').update(update_data).eq('id', user_id).execute()
+        return {"success": True, "data": response.data}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error communicating with Gemini API: {str(e)}")
+        return {"error": str(e)}
 
+
+# ... (All other endpoints like /analyze, /jobs, etc. remain the same) ...
 @app.get("/analyze/{user_id}")
 def analyze_profile(user_id: str):
     try:
@@ -140,17 +154,6 @@ def generate_plan(data: dict):
         if not response.data: return {"plan": [{"id": 0, "title": f"No beginner resources found for {skill_to_learn}. Try searching online!", "url": "", "xp_points": 0}]}
         learning_plan = [{"id": r['id'], "title": f"Learn {skill_to_learn}: {r['title']}", "url": r['url'], "xp_points": r['xp_points']} for r in response.data]
         return {"plan": learning_plan}
-    except Exception as e:
-        return {"error": str(e)}
-
-@app.post("/profile/update")
-def update_profile(data: dict):
-    user_id = data.get("user_id")
-    github_username = data.get("github_username")
-    if not user_id or not github_username: return {"error": "User ID and GitHub username are required."}
-    try:
-        response = supabase.table('profiles').update({'github_username': github_username}).eq('id', user_id).execute()
-        return {"success": True, "data": response.data}
     except Exception as e:
         return {"error": str(e)}
 
